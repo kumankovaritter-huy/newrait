@@ -1,0 +1,451 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import io
+import os
+import re
+from datetime import datetime
+
+# ==================== НАСТРОЙКИ ====================
+VALID_PLATFORMS = [
+    'лемана про', 'лемана про мп', 'мегастрой',
+    'максидом', 'петрович', 'все инструменты'
+]
+
+# Ключевые слова по умолчанию. Если в репозитории лежит seasonal_keywords.txt /
+# lamp_keywords.txt — списки берутся оттуда (по одному слову/фразе на строку,
+# строки с # — комментарии).
+DEFAULT_SEASONAL_KEYWORDS = [
+    'светильник светодиодный', 'на солнечной батарее', 'на солнечных батареях',
+    'солар', 'solar', 'прожектор', 'светильник настенный', 'сад', 'столб',
+    'уличный', 'датчик', 'таймер', 'садовый', 'налобный', 'кемпинговый',
+    'ручной', 'перчатка', 'перчатки', 'фонарь'
+]
+
+DEFAULT_LAMP_KEYWORDS = [
+    'люстра', 'люстр', 'потолочный', 'бра', 'светильник',
+    'подвесной', 'торшер', 'спот', 'ночник'
+]
+
+SEASONALITY_FILES = ['seasonality.xlsx',
+                     'lm_cats_distribution_consistent_filtered_cats.xlsx']
+
+MONTH_NAMES = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+               'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
+
+
+def make_patterns(keywords):
+    """Слева — граница слова: 'сад' найдёт 'сад'/'садовый', но не 'фасадный'."""
+    return [re.compile(r'(?<!\w)' + re.escape(kw.lower())) for kw in keywords]
+
+
+def matches_any(text, patterns):
+    return any(p.search(text) for p in patterns)
+
+
+def load_keywords(path, default):
+    """Список ключевых слов из файла; если файла нет — встроенный список."""
+    if not os.path.exists(path):
+        return default, None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            kws = [line.strip().lower() for line in f
+                   if line.strip() and not line.strip().startswith('#')]
+        if not kws:
+            return default, f"{path} пуст — использован встроенный список."
+        return kws, None
+    except Exception as e:
+        return default, f"Не удалось прочитать {path}: {e}. Использован встроенный список."
+
+
+# ==================== ЧЁРНЫЙ СПИСОК ====================
+def normalize_sku(value):
+    s = str(value).strip()
+    if s.endswith('.0'):
+        s = s[:-2]
+    return s
+
+
+def blacklist_from_lines(lines):
+    bl = set()
+    for line in lines:
+        sku = normalize_sku(line)
+        if sku and not sku.startswith('#'):
+            bl.add(sku)
+            bl.add(sku.replace(' ', ''))
+    return bl
+
+
+def load_blacklist_file(path='blacklist.txt'):
+    if not os.path.exists(path):
+        return set(), f"Файл {path} не найден — чёрный список пуст."
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return blacklist_from_lines(f), None
+    except Exception as e:
+        return set(), f"Не удалось прочитать {path}: {e}"
+
+
+# ==================== СЕЗОННОСТЬ (только справочно) ====================
+@st.cache_data(show_spinner=False)
+def parse_seasonality(file_bytes):
+    """category -> {1..12: доля месяца}. На отбор НЕ влияет, выводится как подсказка."""
+    sdf = pd.read_excel(io.BytesIO(file_bytes))
+    sdf.columns = [str(c).strip() for c in sdf.columns]
+    if 'category' not in sdf.columns:
+        raise ValueError("нет колонки 'category'")
+    month_cols = {}
+    for c in sdf.columns:
+        try:
+            m = int(float(c))
+        except ValueError:
+            continue
+        if 1 <= m <= 12:
+            month_cols[m] = c
+    if len(month_cols) != 12:
+        raise ValueError(f"найдено {len(month_cols)} месячных колонок вместо 12")
+    return {str(r['category']).strip(): {m: float(r[col]) for m, col in month_cols.items()}
+            for _, r in sdf.iterrows()}
+
+
+def load_seasonality_file():
+    for path in SEASONALITY_FILES:
+        if os.path.exists(path):
+            try:
+                with open(path, 'rb') as f:
+                    return parse_seasonality(f.read()), None
+            except Exception as e:
+                return {}, f"Файл сезонности {path}: {e}"
+    return {}, None
+
+
+# ==================== ПАРСИНГ ОТЧЁТА (с кешем) ====================
+@st.cache_data(show_spinner=False)
+def parse_csv(file_bytes):
+    last_err = None
+    for enc in ('utf-8', 'cp1251'):
+        try:
+            return pd.read_csv(io.BytesIO(file_bytes), sep=None,
+                               engine='python', encoding=enc)
+        except UnicodeDecodeError as e:
+            last_err = e
+    raise ValueError(f"Не удалось определить кодировку CSV (UTF-8/CP1251): {last_err}")
+
+
+@st.cache_data(show_spinner=False)
+def get_sheet_names(file_bytes):
+    return pd.ExcelFile(io.BytesIO(file_bytes)).sheet_names
+
+
+@st.cache_data(show_spinner=False)
+def parse_excel(file_bytes, sheet_name):
+    return pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name)
+
+
+# ==================== ОБРАБОТКА ====================
+def clean_numeric(val):
+    if pd.isna(val):
+        return np.nan
+    val_str = str(val).replace('\xa0', '').replace(' ', '').replace(',', '.')
+    try:
+        return float(val_str)
+    except ValueError:
+        return np.nan
+
+
+def check_status(status):
+    """False = закрыт к заказам, строка отсеивается."""
+    if pd.isna(status):
+        return True
+    s = str(status).strip().lower()
+    if 'закрыт к' in s:
+        return False
+    return True
+
+
+def is_sale_status(status):
+    """Распродажа / вывод товара (даже если открыт к заказам)."""
+    if pd.isna(status):
+        return False
+    s = str(status).lower()
+    return ('распродаж' in s) or ('вывод' in s)
+
+
+def get_priority(row, target_rating):
+    rating = row['Рейтинг_число']
+    prev_rating = row['Предыдущий_рейтинг_число']
+    reviews = row['Отзывы_число']
+
+    # 1: критично низкий рейтинг
+    if pd.notna(rating) and rating <= 3.9:
+        return 1
+    # 2: спад относительно предыдущего рейтинга
+    if pd.notna(rating) and rating >= 4.0 and pd.notna(prev_rating) and rating < prev_rating:
+        return 2
+    # 3: ниже проходного и отзывов <= 4
+    if pd.notna(rating) and rating <= target_rating and (pd.isna(reviews) or reviews <= 4):
+        return 3
+    # 4: высокий/неизвестный рейтинг и отзывов <= 2 — риск обвала
+    if (pd.isna(rating) or rating > 4.3) and (pd.isna(reviews) or reviews <= 2):
+        return 4
+    return 99
+
+
+def get_recommendation(row):
+    rating = row['Рейтинг_число']
+    reviews = row['Отзывы_число']
+    if pd.notna(rating) and rating >= 4.0 and pd.notna(reviews) and reviews == 1:
+        return "⚠️ Риск падения: написать 1-2 отзыва"
+    if pd.notna(rating) and rating < 4.0 and pd.notna(reviews) and reviews >= 10:
+        return "📅 Долгосрочная работа: 3-5 отзывов постепенно"
+    return "✅ Стандартная проработка"
+
+
+PRIORITY_EMOJI = {1: "🔴 1", 2: "🟠 2", 3: "🟡 3", 4: "🔵 4"}
+
+# ==================== ИНТЕРФЕЙС ====================
+st.set_page_config(page_title="Аналитика Рейтингов 4.5+", layout="wide")
+
+if os.path.exists('logo.png'):
+    st.image('logo.png', width=300)
+
+st.title("⚡ Автоматизация отбора артикулов для работы с рейтингом")
+
+# ---------- Сайдбар ----------
+st.sidebar.header("⚙️ Настройки")
+target_rating = st.sidebar.number_input(
+    "Проходной рейтинг (приоритет 3)", 4.0, 5.0, 4.5, 0.1,
+    help="Повышайте по мере исправления ситуации.")
+max_rows = int(st.sidebar.number_input(
+    "Лимит объёма: строк «артикул × площадка»", 10, 1000, 150, 10,
+    help="Если лимит срезает артикул посередине, он добирается целиком."))
+
+bl_upload = st.sidebar.file_uploader("Обновить чёрный список (txt)", type=['txt'])
+kw_upload = st.sidebar.file_uploader("Обновить сезонные слова (txt)", type=['txt'])
+
+# ---------- Чёрный список ----------
+if bl_upload is not None:
+    try:
+        lines = bl_upload.getvalue().decode('utf-8', errors='replace').splitlines()
+        BLACKLIST = blacklist_from_lines(lines)
+        st.sidebar.success(f"Чёрный список: {len(BLACKLIST) // 2} артикулов (из файла)")
+    except Exception as e:
+        BLACKLIST = set()
+        st.sidebar.error(f"Не удалось прочитать список: {e}")
+else:
+    BLACKLIST, bl_warning = load_blacklist_file()
+    if bl_warning:
+        st.sidebar.warning(bl_warning)
+
+# ---------- Ключевые слова ----------
+if kw_upload is not None:
+    lines = kw_upload.getvalue().decode('utf-8', errors='replace').splitlines()
+    SEASONAL_KEYWORDS = [l.strip().lower() for l in lines
+                         if l.strip() and not l.strip().startswith('#')]
+    st.sidebar.success(f"Сезонные слова: {len(SEASONAL_KEYWORDS)} (из файла)")
+else:
+    SEASONAL_KEYWORDS, kw_warning = load_keywords('seasonal_keywords.txt',
+                                                  DEFAULT_SEASONAL_KEYWORDS)
+    if kw_warning:
+        st.sidebar.warning(kw_warning)
+
+LAMP_KEYWORDS, lamp_warning = load_keywords('lamp_keywords.txt', DEFAULT_LAMP_KEYWORDS)
+if lamp_warning:
+    st.sidebar.warning(lamp_warning)
+
+SEASONAL_PATTERNS = make_patterns(SEASONAL_KEYWORDS)
+LAMP_PATTERNS = make_patterns(LAMP_KEYWORDS)
+
+# ---------- Сезонные индексы (справочно, на отбор не влияют) ----------
+SEASONALITY, season_warning = load_seasonality_file()
+if season_warning:
+    st.sidebar.warning(season_warning)
+if SEASONALITY:
+    month = datetime.now().month
+    with st.sidebar.expander(f"🗓 Индексы спроса: {MONTH_NAMES[month - 1].lower()} (справочно)"):
+        st.caption("1.00 — средний спрос по году. На отбор не влияет — "
+                   "подсказка для ведения списка сезонных слов.")
+        info = pd.DataFrame(
+            [(cat, round(vals[month] * 12, 2)) for cat, vals in SEASONALITY.items()],
+            columns=['Категория', 'Индекс']
+        ).sort_values('Индекс')
+        st.dataframe(info, hide_index=True, use_container_width=True)
+
+st.caption(f"Цель: {target_rating}+ на всех площадках | "
+           f"Чёрный список: {len(BLACKLIST) // 2 if BLACKLIST else 0} артикулов | "
+           f"Сезонных слов: {len(SEASONAL_KEYWORDS)}")
+
+uploaded_file = st.file_uploader("📁 Загрузите еженедельный отчет (CSV или Excel)",
+                                 type=['csv', 'xlsx'])
+
+if uploaded_file is not None:
+    try:
+        file_bytes = uploaded_file.getvalue()
+        if uploaded_file.name.endswith('.csv'):
+            df = parse_csv(file_bytes)
+        else:
+            sheet_names = get_sheet_names(file_bytes)
+            default_index = 0
+            for i, name in enumerate(sheet_names):
+                if 'текущ' in name.lower():
+                    default_index = i
+                    break
+            selected_sheet = st.selectbox("📂 Выберите лист:", sheet_names,
+                                          index=default_index)
+            df = parse_excel(file_bytes, selected_sheet)
+
+        st.success("✅ Файл успешно прочитан!")
+        df.columns = df.columns.astype(str).str.strip()
+
+        required_cols = ['Артикул поставщика', 'Статус', 'Площадка', 'Рейтинг',
+                         'Кол-во отзывов', 'Предыдущий рейтинг', 'Наименование']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+
+        if missing_cols:
+            st.error(f"❌ Не найдены колонки: {', '.join(missing_cols)}")
+        else:
+            with st.spinner("🔄 Анализируем данные..."):
+                df['Рейтинг_число'] = df['Рейтинг'].apply(clean_numeric)
+                df['Отзывы_число'] = df['Кол-во отзывов'].apply(clean_numeric)
+                df['Предыдущий_рейтинг_число'] = df['Предыдущий рейтинг'].apply(clean_numeric)
+                df['СКУ_норм'] = df['Артикул поставщика'].apply(normalize_sku)
+
+                # --- Воронка фильтрации ---
+                n_total = len(df)
+                df_f = df[df['Статус'].apply(check_status)].copy()
+                n_status = len(df_f)
+
+                df_f = df_f[df_f['Площадка'].astype(str).str.strip()
+                            .str.lower().isin(VALID_PLATFORMS)]
+                n_platform = len(df_f)
+
+                in_blacklist = (
+                    df_f['СКУ_норм'].isin(BLACKLIST) |
+                    df_f['СКУ_норм'].str.replace(' ', '', regex=False).isin(BLACKLIST)
+                )
+                n_blacklisted = int(in_blacklist.sum())
+                df_f = df_f[~in_blacklist]
+
+                # --- Приоритеты ---
+                df_f['Приоритет'] = df_f.apply(get_priority, axis=1,
+                                               target_rating=target_rating)
+                df_f['Распродажа'] = df_f['Статус'].apply(is_sale_status)
+
+                # Распродажа/вывод: берём в работу только приоритет 1 с <3 отзывами
+                sale_drop = df_f['Распродажа'] & ~(
+                    (df_f['Приоритет'] == 1) &
+                    (df_f['Отзывы_число'].fillna(0) <= 2)
+                )
+                # считаем отсев только среди потенциально проблемных строк
+                n_sale_dropped = int((sale_drop & (df_f['Приоритет'] <= 4)).sum())
+                df_f = df_f[~sale_drop]
+
+                df_problems = df_f[df_f['Приоритет'] <= 4].copy()
+                n_problems = len(df_problems)
+
+                with st.expander("🔎 Воронка фильтрации"):
+                    st.write(f"Строк в файле: **{n_total}**")
+                    st.write(f"Отсеяно по статусу «закрыт к заказам»: **{n_total - n_status}**")
+                    st.write(f"Отсеяно по площадке: **{n_status - n_platform}**")
+                    st.write(f"Исключено чёрным списком: **{n_blacklisted}**")
+                    st.write(f"Распродажа/вывод, работа нерациональна: **{n_sale_dropped}**")
+                    st.write(f"Не требуют работы (приоритет 99): "
+                             f"**{len(df_f) - n_problems}**")
+                    if BLACKLIST and n_blacklisted == 0:
+                        st.warning("Чёрный список загружен, но ни одна строка не исключена — "
+                                   "проверьте формат артикулов в списке и в отчёте.")
+
+                if df_problems.empty:
+                    st.warning("⚠️ Проблемных артикулов не обнаружено.")
+                else:
+                    # Финальный приоритет артикула = минимальный по всем площадкам
+                    df_problems['Приоритет'] = (df_problems
+                                                .groupby('СКУ_норм')['Приоритет']
+                                                .transform('min'))
+
+                    names_lower = df_problems['Наименование'].astype(str).str.lower()
+                    df_problems['Сезонный'] = names_lower.apply(
+                        lambda n: matches_any(n, SEASONAL_PATTERNS))
+                    is_lamp = names_lower.apply(lambda n: matches_any(n, LAMP_PATTERNS))
+
+                    # Внутри приоритета 4: сезонные слова -> люстры -> остальное
+                    df_problems['Сортировка_4'] = np.select(
+                        [
+                            (df_problems['Приоритет'] == 4) & df_problems['Сезонный'],
+                            (df_problems['Приоритет'] == 4) & is_lamp,
+                            (df_problems['Приоритет'] == 4),
+                        ],
+                        [1, 2, 3],
+                        default=0
+                    )
+
+                    df_problems.sort_values(
+                        by=['Приоритет', 'Сортировка_4', 'Рейтинг_число'],
+                        ascending=[True, True, True],
+                        inplace=True
+                    )
+
+                    # --- Лимит в строках «артикул × площадка», артикул целиком ---
+                    sku_order = df_problems['СКУ_норм'].drop_duplicates().tolist()
+                    sku_counts = df_problems['СКУ_норм'].value_counts()
+                    selected_skus, total_rows = [], 0
+                    for sku in sku_order:
+                        if total_rows >= max_rows:
+                            break
+                        selected_skus.append(sku)
+                        total_rows += int(sku_counts[sku])
+
+                    final_df = df_problems[df_problems['СКУ_норм']
+                                           .isin(selected_skus)].copy()
+                    final_df['Рекомендация'] = final_df.apply(get_recommendation, axis=1)
+
+                    # ==================== ДАШБОРД ====================
+                    st.markdown("---")
+                    st.subheader("📊 Дашборд")
+
+                    col1, col2, col3, col4 = st.columns(4)
+                    sku_level = final_df.drop_duplicates('СКУ_норм')
+                    with col1:
+                        st.metric("🔴 Приоритет 1 (≤3.9)",
+                                  len(sku_level[sku_level['Приоритет'] == 1]))
+                    with col2:
+                        st.metric("🟠 Приоритет 2 (спад)",
+                                  len(sku_level[sku_level['Приоритет'] == 2]))
+                    with col3:
+                        st.metric(f"🟡 Приоритет 3 (≤{target_rating}, отзывов ≤4)",
+                                  len(sku_level[sku_level['Приоритет'] == 3]))
+                    with col4:
+                        st.metric("🔵 Приоритет 4 (риск, отзывов ≤2)",
+                                  len(sku_level[sku_level['Приоритет'] == 4]))
+
+                    st.write(f"**Объём плана:** {len(final_df)} строк "
+                             f"«артикул × площадка» (лимит {max_rows}) | "
+                             f"**Уникальных артикулов:** {len(selected_skus)} | "
+                             f"**Исключено чёрным списком:** {n_blacklisted} строк")
+
+                    # ==================== ТАБЛИЦА ====================
+                    st.markdown("---")
+                    st.subheader("📋 План работы")
+
+                    display_cols = required_cols + ['Приоритет', 'Сезонный',
+                                                    'Распродажа', 'Рекомендация']
+                    output_df = final_df[display_cols].copy()
+
+                    screen_df = output_df.copy()
+                    screen_df['Приоритет'] = screen_df['Приоритет'].map(
+                        lambda p: PRIORITY_EMOJI.get(p, str(p)))
+
+                    st.dataframe(screen_df, use_container_width=True, height=600)
+
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        output_df.to_excel(writer, index=False, sheet_name='План Отзывов')
+                    st.download_button(
+                        label="📥 Скачать план в Excel",
+                        data=buffer.getvalue(),
+                        file_name="План_работ_по_рейтингам.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+    except Exception as e:
+        st.error(f"Ошибка при обработке файла: {e}")
