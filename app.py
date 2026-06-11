@@ -7,6 +7,11 @@ import re
 from datetime import datetime
 
 # ==================== НАСТРОЙКИ ====================
+# Порядок колонок в выгрузке плана:
+OUTPUT_COLS = ['Артикул площадки', 'Артикул поставщика', 'Площадка', 'Ссылка',
+               'Наименование', 'Статус', 'Рейтинг', 'Кол-во отзывов',
+               'Приоритет', 'Сезонный', 'Рекомендация']
+
 VALID_PLATFORMS = [
     'лемана про', 'лемана про мп', 'мегастрой',
     'максидом', 'петрович', 'все инструменты'
@@ -203,13 +208,35 @@ def get_recommendation(row):
 
 PRIORITY_EMOJI = {1: "🔴 1", 2: "🟠 2", 3: "🟡 3", 4: "🔵 4"}
 
+
+def find_link_column(columns):
+    """Ищем в отчёте колонку с прямыми ссылками ('Ссылка', 'URL' и т.п.)."""
+    for col in columns:
+        c = str(col).strip().lower()
+        if 'ссылк' in c or c == 'url' or 'url' in c.split():
+            return col
+    return None
+
+
 # ==================== ИНТЕРФЕЙС ====================
 st.set_page_config(page_title="Аналитика Рейтингов 4.5+", layout="wide")
 
+# ---------- Шапка: два изображения рядом, по центру ----------
+_, img_left, img_right, _ = st.columns([2, 1, 1, 2])
 if os.path.exists('logo.png'):
-    st.image('logo.png', width=300)
+    with img_left:
+        st.image('logo.png', use_container_width=True)
+for photo in ('второе_фото.png', 'photo2.png'):
+    if os.path.exists(photo):
+        with img_right:
+            st.image(photo, use_container_width=True)
+        break
 
-st.title("⚡ Автоматизация отбора артикулов для работы с рейтингом")
+st.markdown(
+    "<h1 style='text-align: center;'>✨ Автоматизация отбора артикулов "
+    "для работы с рейтингом</h1>",
+    unsafe_allow_html=True
+)
 
 # ---------- Сайдбар ----------
 st.sidebar.header("⚙️ Настройки")
@@ -219,6 +246,16 @@ target_rating = st.sidebar.number_input(
 max_rows = int(st.sidebar.number_input(
     "Лимит объёма: строк «артикул × площадка»", 10, 1000, 150, 10,
     help="Если лимит срезает артикул посередине, он добирается целиком."))
+
+st.sidebar.subheader("🛍️ Распродажа")
+show_sale = st.sidebar.checkbox(
+    "Показать товары на распродаже", value=False,
+    help="Справочная таблица под основным планом: распродажа/вывод с низким "
+         "рейтингом. В основной план такие товары попадают только с ≤2 отзывами.")
+sale_view_reviews = 5
+if show_sale:
+    sale_view_reviews = int(st.sidebar.number_input(
+        "Отзывов не более", 1, 20, 5, 1))
 
 bl_upload = st.sidebar.file_uploader("Обновить чёрный список (txt)", type=['txt'])
 kw_upload = st.sidebar.file_uploader("Обновить сезонные слова (txt)", type=['txt'])
@@ -304,7 +341,7 @@ if uploaded_file is not None:
         if missing_cols:
             st.error(f"❌ Не найдены колонки: {', '.join(missing_cols)}")
         else:
-            with st.spinner("🔄 Анализируем данные..."):
+            with st.spinner("🪄 Анализируем данные..."):
                 df['Рейтинг_число'] = df['Рейтинг'].apply(clean_numeric)
                 df['Отзывы_число'] = df['Кол-во отзывов'].apply(clean_numeric)
                 df['Предыдущий_рейтинг_число'] = df['Предыдущий рейтинг'].apply(clean_numeric)
@@ -330,6 +367,8 @@ if uploaded_file is not None:
                 df_f['Приоритет'] = df_f.apply(get_priority, axis=1,
                                                target_rating=target_rating)
                 df_f['Распродажа'] = df_f['Статус'].apply(is_sale_status)
+                # копия всех распродажных строк — для справочной таблицы
+                df_sale_all = df_f[df_f['Распродажа']].copy()
 
                 # Распродажа/вывод: берём в работу только приоритет 1 с <3 отзывами
                 sale_drop = df_f['Распродажа'] & ~(
@@ -354,6 +393,40 @@ if uploaded_file is not None:
                     if BLACKLIST and n_blacklisted == 0:
                         st.warning("Чёрный список загружен, но ни одна строка не исключена — "
                                    "проверьте формат артикулов в списке и в отчёте.")
+
+                # ==================== РАСПРОДАЖА (справочно) ====================
+                if show_sale:
+                    st.markdown("---")
+                    st.subheader("🛍️ Товары на распродаже")
+                    sale_view = df_sale_all[
+                        (df_sale_all['Рейтинг_число'] <= 3.9) &
+                        (df_sale_all['Отзывы_число'].fillna(0) <= sale_view_reviews)
+                    ].copy()
+                    if sale_view.empty:
+                        st.info("Распродажных товаров с рейтингом ≤3.9 и отзывами "
+                                f"≤{sale_view_reviews} не найдено.")
+                    else:
+                        s_link = find_link_column(sale_view.columns)
+                        sale_view['Ссылка'] = (
+                            sale_view[s_link].astype(str).str.strip()
+                            .replace({'nan': '', 'None': ''}) if s_link else '')
+                        sale_view['В основном плане'] = (
+                            (sale_view['Приоритет'] == 1) &
+                            (sale_view['Отзывы_число'].fillna(0) <= 2))
+                        sale_cols = [c for c in
+                                     ['Артикул площадки', 'Артикул поставщика',
+                                      'Площадка', 'Ссылка', 'Наименование', 'Статус',
+                                      'Рейтинг', 'Кол-во отзывов', 'В основном плане']
+                                     if c in sale_view.columns]
+                        st.caption(f"Распродажа/вывод, рейтинг ≤3.9, отзывов "
+                                   f"≤{sale_view_reviews}. Справочно — на основной "
+                                   f"план не влияет.")
+                        st.dataframe(
+                            sale_view[sale_cols], use_container_width=True,
+                            column_config={
+                                'Ссылка': st.column_config.LinkColumn(
+                                    'Ссылка', display_text='Открыть 🔗')
+                            })
 
                 if df_problems.empty:
                     st.warning("⚠️ Проблемных артикулов не обнаружено.")
@@ -399,9 +472,26 @@ if uploaded_file is not None:
                                            .isin(selected_skus)].copy()
                     final_df['Рекомендация'] = final_df.apply(get_recommendation, axis=1)
 
+                    # --- Ссылка на карточку: только из отчёта ---
+                    report_link_col = find_link_column(final_df.columns)
+                    if report_link_col:
+                        final_df['Ссылка'] = (final_df[report_link_col]
+                                              .astype(str).str.strip()
+                                              .replace({'nan': '', 'None': ''}))
+                    else:
+                        final_df['Ссылка'] = ''
+                        st.warning("В отчёте не найдена колонка со ссылками "
+                                   "(«Ссылка», «URL» и т.п.) — колонка останется пустой.")
+
+                    # --- Артикул площадки ---
+                    if 'Артикул площадки' not in final_df.columns:
+                        final_df['Артикул площадки'] = ''
+                        st.warning("В отчёте не найдена колонка «Артикул площадки» — "
+                                   "колонка останется пустой.")
+
                     # ==================== ДАШБОРД ====================
                     st.markdown("---")
-                    st.subheader("📊 Дашборд")
+                    st.subheader("💫 Дашборд")
 
                     col1, col2, col3, col4 = st.columns(4)
                     sku_level = final_df.drop_duplicates('СКУ_норм')
@@ -425,21 +515,33 @@ if uploaded_file is not None:
 
                     # ==================== ТАБЛИЦА ====================
                     st.markdown("---")
-                    st.subheader("📋 План работы")
+                    st.subheader("📝 План работы")
 
-                    display_cols = required_cols + ['Приоритет', 'Сезонный',
-                                                    'Распродажа', 'Рекомендация']
-                    output_df = final_df[display_cols].copy()
+                    output_df = final_df[OUTPUT_COLS].copy()
 
                     screen_df = output_df.copy()
                     screen_df['Приоритет'] = screen_df['Приоритет'].map(
                         lambda p: PRIORITY_EMOJI.get(p, str(p)))
 
-                    st.dataframe(screen_df, use_container_width=True, height=600)
+                    st.dataframe(
+                        screen_df, use_container_width=True, height=600,
+                        column_config={
+                            'Ссылка': st.column_config.LinkColumn(
+                                'Ссылка', display_text='Открыть 🔗')
+                        })
 
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        output_df.to_excel(writer, index=False, sheet_name='План Отзывов')
+                        output_df.to_excel(writer, index=False,
+                                           sheet_name='План Отзывов')
+                        ws = writer.sheets['План Отзывов']
+                        link_col_idx = output_df.columns.get_loc('Ссылка') + 1
+                        for row_i, url in enumerate(output_df['Ссылка'], start=2):
+                            if url:
+                                cell = ws.cell(row=row_i, column=link_col_idx)
+                                cell.value = 'Открыть'
+                                cell.hyperlink = url
+                                cell.style = 'Hyperlink'
                     st.download_button(
                         label="📥 Скачать план в Excel",
                         data=buffer.getvalue(),
