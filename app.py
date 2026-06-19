@@ -218,6 +218,46 @@ def find_link_column(columns):
     return None
 
 
+def find_stock_column(columns):
+    """Ищем колонку наличия/остатка."""
+    for col in columns:
+        c = str(col).strip().lower()
+        if 'наличи' in c or 'остат' in c or c == 'сток' or 'склад' in c:
+            return col
+    return None
+
+
+# Текстовые значения, означающие отсутствие товара
+OUT_OF_STOCK_WORDS = ['нет в наличии', 'не в наличии', 'отсутств', 'нет',
+                      'под заказ', 'распродан', 'закончил', 'out of stock', '0']
+
+
+def is_in_stock(value):
+    """True, если товар в наличии.
+
+    Формат отчёта: колонка «Наличие» со значениями «В наличии» / «Нет в наличии».
+    Дополнительно поддержаны числовые остатки и прочие текстовые формулировки.
+    """
+    if pd.isna(value):
+        return False
+    s = str(value).strip().lower()
+    if s == '':
+        return False
+    # точные значения из отчёта
+    if s == 'в наличии':
+        return True
+    if s == 'нет в наличии':
+        return False
+    # число: 0 -> нет, >0 -> есть
+    num = clean_numeric(s)
+    if pd.notna(num):
+        return num > 0
+    # прочий текст: ищем слова об отсутствии
+    if any(w in s for w in OUT_OF_STOCK_WORDS):
+        return False
+    return True
+
+
 # ==================== ИНТЕРФЕЙС ====================
 st.set_page_config(page_title="Аналитика Рейтингов 4.5+", layout="wide")
 
@@ -363,6 +403,14 @@ if uploaded_file is not None:
                 n_blacklisted = int(in_blacklist.sum())
                 df_f = df_f[~in_blacklist]
 
+                # --- Фильтр наличия: товары не в наличии в работу не берём ---
+                stock_col = find_stock_column(df_f.columns)
+                n_out_of_stock = 0
+                if stock_col:
+                    in_stock_mask = df_f[stock_col].apply(is_in_stock)
+                    n_out_of_stock = int((~in_stock_mask).sum())
+                    df_f = df_f[in_stock_mask]
+
                 # --- Приоритеты ---
                 df_f['Приоритет'] = df_f.apply(get_priority, axis=1,
                                                target_rating=target_rating)
@@ -387,6 +435,12 @@ if uploaded_file is not None:
                     st.write(f"Отсеяно по статусу «закрыт к заказам»: **{n_total - n_status}**")
                     st.write(f"Отсеяно по площадке: **{n_status - n_platform}**")
                     st.write(f"Исключено чёрным списком: **{n_blacklisted}**")
+                    if stock_col:
+                        st.write(f"Не в наличии (колонка «{stock_col}»): "
+                                 f"**{n_out_of_stock}**")
+                    else:
+                        st.info("Колонка наличия не найдена — фильтр по наличию "
+                                "не применялся.")
                     st.write(f"Распродажа/вывод, работа нерациональна: **{n_sale_dropped}**")
                     st.write(f"Не требуют работы (приоритет 99): "
                              f"**{len(df_f) - n_problems}**")
