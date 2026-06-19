@@ -35,6 +35,66 @@ DEFAULT_LAMP_KEYWORDS = [
 SEASONALITY_FILES = ['seasonality.xlsx',
                      'lm_cats_distribution_consistent_filtered_cats.xlsx']
 
+# Файл несезонных слов: слово ; месяцы провала (1-12)
+OFFSEASON_FILE = 'seasonal_offseason.txt'
+
+
+def parse_offseason_lines(lines):
+    """Список (слово, regex, {месяцы}), отсортированный от длинных фраз к коротким.
+
+    Многословные фразы допускают вставки между словами: фраза «фонарь настенный»
+    найдётся и в «фонарь-подсветка настенный». Левая граница слова сохраняется,
+    чтобы 'сад' не цеплял 'фасад'.
+    """
+    items = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#') or ';' not in line:
+            continue
+        parts = line.split(';')
+        word = parts[0].strip().lower()
+        months = set()
+        for p in parts[1:]:
+            p = p.strip()
+            if p.isdigit() and 1 <= int(p) <= 12:
+                months.add(int(p))
+        if not (word and months):
+            continue
+        tokens = word.split()
+        if len(tokens) > 1:
+            # слова фразы по порядку; между ними до ~25 символов вставок
+            pat = r'(?<!\w)' + r'\w*\b.{0,25}?\b'.join(re.escape(t) for t in tokens)
+        else:
+            pat = r'(?<!\w)' + re.escape(word)
+        items.append((word, re.compile(pat), months))
+    # длинные фразы первыми — конкретное побеждает общее
+    items.sort(key=lambda x: -len(x[0]))
+    return items
+
+
+def load_offseason_file(path=OFFSEASON_FILE):
+    if not os.path.exists(path):
+        return [], f"Файл {path} не найден — сезонный фильтр не применяется."
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return parse_offseason_lines(f), None
+    except Exception as e:
+        return [], f"Не удалось прочитать {path}: {e}"
+
+
+def is_offseason(name_lower, month, offseason_items):
+    """True, если для названия сработало несезонное слово в данном месяце.
+
+    Идём от длинных фраз к коротким — первое совпавшее слово решает.
+    """
+    if not month:
+        return False
+    for word, pattern, months in offseason_items:
+        if pattern.search(name_lower):
+            return month in months
+    return False
+
+
 MONTH_NAMES = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
                'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
 
@@ -227,6 +287,24 @@ def find_stock_column(columns):
     return None
 
 
+def find_date_column(columns):
+    """Ищем колонку с датой парсинга."""
+    for col in columns:
+        c = str(col).strip().lower()
+        if 'дата парсинга' in c or 'дата' in c or 'парсинг' in c:
+            return col
+    return None
+
+
+def detect_report_month(series):
+    """Месяц отчёта = самая частая дата в колонке (формат ДД.ММ.ГГГГ и пр.)."""
+    parsed = pd.to_datetime(series, dayfirst=True, errors='coerce')
+    parsed = parsed.dropna()
+    if parsed.empty:
+        return None
+    return int(parsed.dt.month.mode().iloc[0])
+
+
 # Текстовые значения, означающие отсутствие товара
 OUT_OF_STOCK_WORDS = ['нет в наличии', 'не в наличии', 'отсутств', 'нет',
                       'под заказ', 'распродан', 'закончил', 'out of stock', '0']
@@ -299,6 +377,8 @@ if show_sale:
 
 bl_upload = st.sidebar.file_uploader("Обновить чёрный список (txt)", type=['txt'])
 kw_upload = st.sidebar.file_uploader("Обновить сезонные слова (txt)", type=['txt'])
+off_upload = st.sidebar.file_uploader("Обновить несезонные слова по месяцам (txt)",
+                                      type=['txt'])
 
 # ---------- Чёрный список ----------
 if bl_upload is not None:
@@ -333,24 +413,24 @@ if lamp_warning:
 SEASONAL_PATTERNS = make_patterns(SEASONAL_KEYWORDS)
 LAMP_PATTERNS = make_patterns(LAMP_KEYWORDS)
 
-# ---------- Сезонные индексы (справочно, на отбор не влияют) ----------
-SEASONALITY, season_warning = load_seasonality_file()
-if season_warning:
-    st.sidebar.warning(season_warning)
-if SEASONALITY:
-    month = datetime.now().month
-    with st.sidebar.expander(f"🗓 Индексы спроса: {MONTH_NAMES[month - 1].lower()} (справочно)"):
-        st.caption("1.00 — средний спрос по году. На отбор не влияет — "
-                   "подсказка для ведения списка сезонных слов.")
-        info = pd.DataFrame(
-            [(cat, round(vals[month] * 12, 2)) for cat, vals in SEASONALITY.items()],
-            columns=['Категория', 'Индекс']
-        ).sort_values('Индекс')
-        st.dataframe(info, hide_index=True, use_container_width=True)
+# ---------- Несезонные слова по месяцам (новый фильтр) ----------
+if off_upload is not None:
+    lines = off_upload.getvalue().decode('utf-8', errors='replace').splitlines()
+    OFFSEASON_ITEMS = parse_offseason_lines(lines)
+    st.sidebar.success(f"Несезонные слова: {len(OFFSEASON_ITEMS)} (из файла)")
+else:
+    OFFSEASON_ITEMS, off_warning = load_offseason_file()
+    if off_warning:
+        st.sidebar.warning(off_warning)
+
+apply_offseason = st.sidebar.checkbox(
+    "Учитывать сезонность по месяцам", value=True,
+    help="Несезонные товары: приоритеты 3-4 убираем; приоритет 1 оставляем при "
+         "<5 отзывах; приоритет 2 — при <10 отзывах.")
 
 st.caption(f"Цель: {target_rating}+ на всех площадках | "
            f"Чёрный список: {len(BLACKLIST) // 2 if BLACKLIST else 0} артикулов | "
-           f"Сезонных слов: {len(SEASONAL_KEYWORDS)}")
+           f"Несезонных правил: {len(OFFSEASON_ITEMS)}")
 
 uploaded_file = st.file_uploader("📁 Загрузите еженедельный отчет (CSV или Excel)",
                                  type=['csv', 'xlsx'])
@@ -427,10 +507,37 @@ if uploaded_file is not None:
                 n_sale_dropped = int((sale_drop & (df_f['Приоритет'] <= 4)).sum())
                 df_f = df_f[~sale_drop]
 
+                # --- Сезонный фильтр по месяцу даты парсинга ---
+                report_month = None
+                date_col = find_date_column(df.columns)
+                if date_col is not None:
+                    report_month = detect_report_month(df[date_col])
+
+                n_offseason_dropped = 0
+                if apply_offseason and OFFSEASON_ITEMS and report_month:
+                    names_low = df_f['Наименование'].astype(str).str.lower()
+                    off_mask = names_low.apply(
+                        lambda n: is_offseason(n, report_month, OFFSEASON_ITEMS))
+                    rev = df_f['Отзывы_число'].fillna(0)
+                    # несезонные оставляем по правилам приоритетов:
+                    keep_offseason = (
+                        ((df_f['Приоритет'] == 1) & (rev < 5)) |
+                        ((df_f['Приоритет'] == 2) & (rev < 10))
+                    )
+                    drop_offseason = off_mask & ~keep_offseason & (df_f['Приоритет'] <= 4)
+                    n_offseason_dropped = int(drop_offseason.sum())
+                    df_f = df_f[~drop_offseason]
+
                 df_problems = df_f[df_f['Приоритет'] <= 4].copy()
                 n_problems = len(df_problems)
 
                 with st.expander("🔎 Воронка фильтрации"):
+                    if report_month:
+                        st.write(f"Месяц отчёта (по дате парсинга): "
+                                 f"**{MONTH_NAMES[report_month - 1]}**")
+                    elif apply_offseason:
+                        st.info("Колонка с датой парсинга не найдена или дата не "
+                                "распознана — сезонный фильтр не применялся.")
                     st.write(f"Строк в файле: **{n_total}**")
                     st.write(f"Отсеяно по статусу «закрыт к заказам»: **{n_total - n_status}**")
                     st.write(f"Отсеяно по площадке: **{n_status - n_platform}**")
@@ -442,6 +549,7 @@ if uploaded_file is not None:
                         st.info("Колонка наличия не найдена — фильтр по наличию "
                                 "не применялся.")
                     st.write(f"Распродажа/вывод, работа нерациональна: **{n_sale_dropped}**")
+                    st.write(f"Отложено как несезонные: **{n_offseason_dropped}**")
                     st.write(f"Не требуют работы (приоритет 99): "
                              f"**{len(df_f) - n_problems}**")
                     if BLACKLIST and n_blacklisted == 0:
