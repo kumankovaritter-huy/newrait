@@ -629,8 +629,8 @@ if uploaded_file is not None:
                         df_problems['Приоритет'] >= 3, plat_rank, 0)
 
                     df_problems.sort_values(
-                        by=['Приоритет', 'Сортировка_4', 'Рейтинг_число',
-                            'Сортировка_площадка'],
+                        by=['Приоритет', 'Сортировка_4', 'Сортировка_площадка',
+                            'Рейтинг_число'],
                         ascending=[True, True, True, True],
                         inplace=True
                     )
