@@ -280,6 +280,25 @@ def get_recommendation(row):
 PRIORITY_EMOJI = {1: "🔴 1", 2: "🟠 2", 3: "🟡 3", 4: "🔵 4"}
 
 
+def reviews_needed(current, reviews, target):
+    """Сколько отзывов на 5★ добавить, чтобы средний рейтинг достиг target.
+
+    Возвращает (число | None, текст-пояснение). None — недостижимо.
+    """
+    import math
+    if target <= current:
+        return 0, "Цель уже достигнута — добавлять не нужно."
+    if target >= 5.0:
+        return None, "Рейтинг 5.0 недостижим, пока есть оценки ниже 5★."
+    # current*reviews + 5*n >= target*(reviews+n)
+    raw = (target - current) * reviews / (5 - target)
+    # допуск против ошибок float: 5.9999999 не должно становиться 7
+    n = max(0, math.ceil(raw - 1e-9))
+    new_avg = (current * reviews + 5 * n) / (reviews + n) if (reviews + n) else 0
+    return n, f"Новый рейтинг станет ≈ {new_avg:.2f}"
+
+
+
 def find_link_column(columns):
     """Ищем в отчёте колонку с прямыми ссылками ('Ссылка', 'URL' и т.п.)."""
     for col in columns:
@@ -369,27 +388,57 @@ st.markdown(
 
 # ---------- Сайдбар ----------
 st.sidebar.header("⚙️ Настройки")
-target_rating = st.sidebar.number_input(
-    "Проходной рейтинг (приоритет 3)", 4.0, 5.0, 4.5, 0.1,
-    help="Повышайте по мере исправления ситуации.")
+
+# 1. Лимит объёма — самое частое
 max_rows = int(st.sidebar.number_input(
     "Лимит объёма: строк «артикул × площадка»", 10, 1000, 150, 10,
     help="Если лимит срезает артикул посередине, он добирается целиком."))
 
-st.sidebar.subheader("🛍️ Распродажа")
-show_sale = st.sidebar.checkbox(
-    "Показать товары на распродаже", value=False,
-    help="Справочная таблица под основным планом: распродажа/вывод с низким "
-         "рейтингом. В основной план такие товары попадают только с ≤2 отзывами.")
-sale_view_reviews = 5
-if show_sale:
-    sale_view_reviews = int(st.sidebar.number_input(
-        "Отзывов не более", 1, 20, 5, 1))
+# 2. Калькулятор отзывов — рабочий инструмент, раскрыт
+with st.sidebar.expander("🧮 Калькулятор отзывов", expanded=True):
+    st.caption("Сколько отзывов на 5★ нужно для целевого рейтинга.")
+    calc_rating = st.number_input("Текущий рейтинг", 1.0, 5.0, 3.9, 0.1,
+                                  key="calc_rating")
+    calc_reviews = int(st.number_input("Текущее число отзывов", 0, 100000, 5, 1,
+                                       key="calc_reviews"))
+    calc_target = st.number_input("Желаемый рейтинг", 1.0, 5.0, 4.5, 0.1,
+                                  key="calc_target")
+    _n, _msg = reviews_needed(calc_rating, calc_reviews, calc_target)
+    if _n is None:
+        st.warning(_msg)
+    elif _n == 0:
+        st.success(_msg)
+    else:
+        st.success(f"Нужно отзывов (5★): **{_n}**")
+        st.caption(_msg)
 
-bl_upload = st.sidebar.file_uploader("Обновить чёрный список (txt)", type=['txt'])
-kw_upload = st.sidebar.file_uploader("Обновить сезонные слова (txt)", type=['txt'])
-off_upload = st.sidebar.file_uploader("Обновить несезонные слова по месяцам (txt)",
-                                      type=['txt'])
+# 3. Параметры отбора — меняются редко, свёрнуто
+with st.sidebar.expander("🎯 Параметры отбора", expanded=False):
+    target_rating = st.number_input(
+        "Проходной рейтинг (приоритет 3)", 4.0, 5.0, 4.5, 0.1,
+        help="Повышайте по мере исправления ситуации.")
+    apply_offseason = st.checkbox(
+        "Учитывать сезонность по месяцам", value=True,
+        help="Несезонные товары: приоритеты 3-4 убираем; приоритет 1 оставляем "
+             "при <5 отзывах; приоритет 2 — при <10 отзывах.")
+    boost_lamps = st.checkbox(
+        "Поднимать люстры в приоритете 4", value=False,
+        help="Включите, когда приедет завоз люстр. Сейчас люстры сортируются "
+             "наравне с остальными категориями.")
+    show_sale = st.checkbox(
+        "Показать товары на распродаже", value=False,
+        help="Справочная таблица под основным планом: распродажа/вывод с низким "
+             "рейтингом. В основной план такие товары попадают только с ≤2 отзывами.")
+    sale_view_reviews = 5
+    if show_sale:
+        sale_view_reviews = int(st.number_input("Распродажа: отзывов не более",
+                                                1, 20, 5, 1))
+
+# 4. Обновление списков — реже всего, свёрнуто и внизу
+with st.sidebar.expander("📂 Обновить списки", expanded=False):
+    bl_upload = st.file_uploader("Чёрный список (txt)", type=['txt'])
+    kw_upload = st.file_uploader("Сезонные слова (txt)", type=['txt'])
+    off_upload = st.file_uploader("Несезонные слова по месяцам (txt)", type=['txt'])
 
 # ---------- Чёрный список ----------
 if bl_upload is not None:
@@ -424,7 +473,7 @@ if lamp_warning:
 SEASONAL_PATTERNS = make_patterns(SEASONAL_KEYWORDS)
 LAMP_PATTERNS = make_patterns(LAMP_KEYWORDS)
 
-# ---------- Несезонные слова по месяцам (новый фильтр) ----------
+# ---------- Несезонные слова по месяцам ----------
 if off_upload is not None:
     lines = off_upload.getvalue().decode('utf-8', errors='replace').splitlines()
     OFFSEASON_ITEMS = parse_offseason_lines(lines)
@@ -433,56 +482,6 @@ else:
     OFFSEASON_ITEMS, off_warning = load_offseason_file()
     if off_warning:
         st.sidebar.warning(off_warning)
-
-apply_offseason = st.sidebar.checkbox(
-    "Учитывать сезонность по месяцам", value=True,
-    help="Несезонные товары: приоритеты 3-4 убираем; приоритет 1 оставляем при "
-         "<5 отзывах; приоритет 2 — при <10 отзывах.")
-
-boost_lamps = st.sidebar.checkbox(
-    "Поднимать люстры в приоритете 4", value=False,
-    help="Включите, когда приедет завоз люстр. Сейчас люстры сортируются "
-         "наравне с остальными категориями.")
-
-# ---------- Калькулятор отзывов ----------
-st.sidebar.markdown("---")
-st.sidebar.subheader("🧮 Калькулятор отзывов")
-st.sidebar.caption("Сколько отзывов на 5★ нужно для целевого рейтинга.")
-calc_rating = st.sidebar.number_input(
-    "Текущий рейтинг", 1.0, 5.0, 3.9, 0.1, key="calc_rating")
-calc_reviews = int(st.sidebar.number_input(
-    "Текущее число отзывов", 0, 100000, 5, 1, key="calc_reviews"))
-calc_target = st.sidebar.number_input(
-    "Желаемый рейтинг", 1.0, 5.0, 4.5, 0.1, key="calc_target")
-
-
-def reviews_needed(current, reviews, target):
-    """Сколько отзывов на 5★ добавить, чтобы средний достиг target.
-
-    Возвращает (число | None, текст-пояснение). None — недостижимо.
-    """
-    if target <= current:
-        return 0, "Цель уже достигнута — добавлять не нужно."
-    if target >= 5.0:
-        return None, "Рейтинг 5.0 недостижим, пока есть оценки ниже 5★."
-    # current*reviews + 5*n  >=  target*(reviews+n)
-    # n >= (target - current) * reviews / (5 - target)
-    import math
-    raw = (target - current) * reviews / (5 - target)
-    # допуск против ошибок float: 5.9999999 не должно становиться 7
-    n = max(0, math.ceil(raw - 1e-9))
-    new_avg = (current * reviews + 5 * n) / (reviews + n) if (reviews + n) else 0
-    return n, f"Новый рейтинг станет ≈ {new_avg:.2f}"
-
-
-_n, _msg = reviews_needed(calc_rating, calc_reviews, calc_target)
-if _n is None:
-    st.sidebar.warning(_msg)
-elif _n == 0:
-    st.sidebar.success(_msg)
-else:
-    st.sidebar.success(f"Нужно отзывов (5★): **{_n}**")
-    st.sidebar.caption(_msg)
 
 st.caption(f"Цель: {target_rating}+ на всех площадках | "
            f"Чёрный список: {len(BLACKLIST) // 2 if BLACKLIST else 0} артикулов | "
