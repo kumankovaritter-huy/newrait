@@ -444,6 +444,46 @@ boost_lamps = st.sidebar.checkbox(
     help="Включите, когда приедет завоз люстр. Сейчас люстры сортируются "
          "наравне с остальными категориями.")
 
+# ---------- Калькулятор отзывов ----------
+st.sidebar.markdown("---")
+st.sidebar.subheader("🧮 Калькулятор отзывов")
+st.sidebar.caption("Сколько отзывов на 5★ нужно для целевого рейтинга.")
+calc_rating = st.sidebar.number_input(
+    "Текущий рейтинг", 1.0, 5.0, 3.9, 0.1, key="calc_rating")
+calc_reviews = int(st.sidebar.number_input(
+    "Текущее число отзывов", 0, 100000, 5, 1, key="calc_reviews"))
+calc_target = st.sidebar.number_input(
+    "Желаемый рейтинг", 1.0, 5.0, 4.5, 0.1, key="calc_target")
+
+
+def reviews_needed(current, reviews, target):
+    """Сколько отзывов на 5★ добавить, чтобы средний достиг target.
+
+    Возвращает (число | None, текст-пояснение). None — недостижимо.
+    """
+    if target <= current:
+        return 0, "Цель уже достигнута — добавлять не нужно."
+    if target >= 5.0:
+        return None, "Рейтинг 5.0 недостижим, пока есть оценки ниже 5★."
+    # current*reviews + 5*n  >=  target*(reviews+n)
+    # n >= (target - current) * reviews / (5 - target)
+    import math
+    raw = (target - current) * reviews / (5 - target)
+    # допуск против ошибок float: 5.9999999 не должно становиться 7
+    n = max(0, math.ceil(raw - 1e-9))
+    new_avg = (current * reviews + 5 * n) / (reviews + n) if (reviews + n) else 0
+    return n, f"Новый рейтинг станет ≈ {new_avg:.2f}"
+
+
+_n, _msg = reviews_needed(calc_rating, calc_reviews, calc_target)
+if _n is None:
+    st.sidebar.warning(_msg)
+elif _n == 0:
+    st.sidebar.success(_msg)
+else:
+    st.sidebar.success(f"Нужно отзывов (5★): **{_n}**")
+    st.sidebar.caption(_msg)
+
 st.caption(f"Цель: {target_rating}+ на всех площадках | "
            f"Чёрный список: {len(BLACKLIST) // 2 if BLACKLIST else 0} артикулов | "
            f"Несезонных правил: {len(OFFSEASON_ITEMS)}")
@@ -609,10 +649,16 @@ if uploaded_file is not None:
                 if df_problems.empty:
                     st.warning("⚠️ Проблемных артикулов не обнаружено.")
                 else:
+                    # Приоритет строки (этой карточки) — сохраняем до группировки
+                    df_problems['Приоритет_строки'] = df_problems['Приоритет']
                     # Финальный приоритет артикула = минимальный по всем площадкам
                     df_problems['Приоритет'] = (df_problems
                                                 .groupby('СКУ_норм')['Приоритет']
                                                 .transform('min'))
+                    # Флаг "Г": строка прицеплена к артикулу группировкой
+                    # (её собственный приоритет хуже приоритета артикула)
+                    df_problems['Группа'] = (df_problems['Приоритет_строки']
+                                             > df_problems['Приоритет'])
 
                     names_lower = df_problems['Наименование'].astype(str).str.lower()
                     df_problems['Сезонный'] = names_lower.apply(
@@ -727,8 +773,12 @@ if uploaded_file is not None:
                     output_df = final_df[OUTPUT_COLS].copy()
 
                     screen_df = output_df.copy()
-                    screen_df['Приоритет'] = screen_df['Приоритет'].map(
-                        lambda p: PRIORITY_EMOJI.get(p, str(p)))
+                    # метка приоритета + флаг "Г" для прицепленных группировкой строк
+                    grp_flag = final_df['Группа'].values
+                    screen_df['Приоритет'] = [
+                        PRIORITY_EMOJI.get(p, str(p)) + (' Г' if g else '')
+                        for p, g in zip(screen_df['Приоритет'], grp_flag)
+                    ]
 
                     st.dataframe(
                         screen_df, use_container_width=True, height=600,
@@ -738,12 +788,18 @@ if uploaded_file is not None:
                         })
 
                     buffer = io.BytesIO()
+                    excel_df = output_df.copy()
+                    # в Excel: приоритет числом + " Г" для прицепленных (как на экране)
+                    excel_df['Приоритет'] = [
+                        f"{p} Г" if g else str(p)
+                        for p, g in zip(excel_df['Приоритет'], grp_flag)
+                    ]
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        output_df.to_excel(writer, index=False,
-                                           sheet_name='План Отзывов')
+                        excel_df.to_excel(writer, index=False,
+                                          sheet_name='План Отзывов')
                         ws = writer.sheets['План Отзывов']
-                        link_col_idx = output_df.columns.get_loc('Ссылка') + 1
-                        for row_i, url in enumerate(output_df['Ссылка'], start=2):
+                        link_col_idx = excel_df.columns.get_loc('Ссылка') + 1
+                        for row_i, url in enumerate(excel_df['Ссылка'], start=2):
                             if url:
                                 cell = ws.cell(row=row_i, column=link_col_idx)
                                 cell.value = 'Открыть'
