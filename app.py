@@ -369,6 +369,22 @@ def is_in_stock(value):
 # ==================== ИНТЕРФЕЙС ====================
 st.set_page_config(page_title="Аналитика Рейтингов 4.5+", layout="wide")
 
+# CSS: спрятать английскую подпись "200MB per file" и центрировать загрузчик отчёта.
+# Завязано на внутренние классы Streamlit — при обновлении платформы может
+# потребовать правки (тогда кнопка просто вернётся влево, без поломки).
+st.markdown("""
+<style>
+/* Прячем строку с лимитом размера файла у всех загрузчиков */
+[data-testid="stFileUploaderDropzoneInstructions"] small { display: none; }
+/* Центрируем содержимое зоны загрузки главного отчёта */
+section[data-testid="stFileUploaderDropzone"] {
+    justify-content: center;
+    text-align: center;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 # ---------- Шапка: два изображения рядом, по центру ----------
 _, img_left, img_right, _ = st.columns([2, 1, 1, 2])
 if os.path.exists('logo.png'):
@@ -394,7 +410,7 @@ st.markdown(
 # ---------- Сайдбар ----------
 # Логотип компании (квадрат 1x1) — по центру вверху панели
 if os.path.exists('company.png'):
-    _, c_mid, _ = st.sidebar.columns([1, 2, 1])
+    _, c_mid, _ = st.sidebar.columns([1, 1, 1])
     with c_mid:
         st.image('company.png', use_container_width=True)
 
