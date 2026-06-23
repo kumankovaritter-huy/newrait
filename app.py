@@ -385,6 +385,11 @@ st.markdown(
     "для работы с рейтингом</h1>",
     unsafe_allow_html=True
 )
+st.markdown(
+    "<p style='text-align: center; color: gray; margin-top: -10px;'>"
+    "Цель: рейтинг 4.5+ на всех площадках</p>",
+    unsafe_allow_html=True
+)
 
 # ---------- Сайдбар ----------
 st.sidebar.header("⚙️ Настройки")
@@ -483,12 +488,19 @@ else:
     if off_warning:
         st.sidebar.warning(off_warning)
 
-st.caption(f"Цель: {target_rating}+ на всех площадках | "
-           f"Чёрный список: {len(BLACKLIST) // 2 if BLACKLIST else 0} артикулов | "
-           f"Несезонных правил: {len(OFFSEASON_ITEMS)}")
+# Технический статус приложения — внизу сайдбара (мелким, не на главной)
+st.sidebar.markdown("---")
+st.sidebar.caption(
+    f"📋 Чёрный список: {len(BLACKLIST) // 2 if BLACKLIST else 0} артикулов  \n"
+    f"🗓 Несезонных правил: {len(OFFSEASON_ITEMS)}")
 
-uploaded_file = st.file_uploader("📁 Загрузите еженедельный отчет (CSV или Excel)",
-                                 type=['csv', 'xlsx'])
+st.markdown(
+    "<p style='text-align: center; font-size: 1.05rem; margin-bottom: 0.3rem;'>"
+    "📁 Загрузите еженедельный отчёт (CSV или Excel)</p>",
+    unsafe_allow_html=True
+)
+uploaded_file = st.file_uploader(
+    "Загрузка отчёта", type=['csv', 'xlsx'], label_visibility="collapsed")
 
 if uploaded_file is not None:
     try:
