@@ -392,6 +392,12 @@ st.markdown(
 )
 
 # ---------- Сайдбар ----------
+# Логотип компании (квадрат 1x1) — по центру вверху панели
+if os.path.exists('company.png'):
+    _, c_mid, _ = st.sidebar.columns([1, 2, 1])
+    with c_mid:
+        st.image('company.png', use_container_width=True)
+
 st.sidebar.header("⚙️ Настройки")
 
 # 1. Лимит объёма — самое частое
@@ -488,11 +494,10 @@ else:
     if off_warning:
         st.sidebar.warning(off_warning)
 
-# Технический статус приложения — внизу сайдбара (мелким, не на главной)
-st.sidebar.markdown("---")
-st.sidebar.caption(
-    f"📋 Чёрный список: {len(BLACKLIST) // 2 if BLACKLIST else 0} артикулов  \n"
-    f"🗓 Несезонных правил: {len(OFFSEASON_ITEMS)}")
+# Технический статус приложения — свёрнут, не мозолит глаза
+with st.sidebar.expander("ℹ️ Статус загруженных списков", expanded=False):
+    st.caption(f"Чёрный список: {len(BLACKLIST) // 2 if BLACKLIST else 0} артикулов")
+    st.caption(f"Несезонных правил: {len(OFFSEASON_ITEMS)}")
 
 st.markdown(
     "<p style='text-align: center; font-size: 1.05rem; margin-bottom: 0.3rem;'>"
