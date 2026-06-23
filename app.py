@@ -22,6 +22,10 @@ VALID_PLATFORMS = [
 PLATFORM_PRIORITY = {
     'лемана про': 0,
     'лемана про мп': 1,
+    'петрович': 2,
+    'мегастрой': 3,
+    'максидом': 4,
+    'все инструменты': 5,
 }
 
 # Ключевые слова по умолчанию. Если в репозитории лежит seasonal_keywords.txt /
@@ -435,6 +439,11 @@ apply_offseason = st.sidebar.checkbox(
     help="Несезонные товары: приоритеты 3-4 убираем; приоритет 1 оставляем при "
          "<5 отзывах; приоритет 2 — при <10 отзывах.")
 
+boost_lamps = st.sidebar.checkbox(
+    "Поднимать люстры в приоритете 4", value=False,
+    help="Включите, когда приедет завоз люстр. Сейчас люстры сортируются "
+         "наравне с остальными категориями.")
+
 st.caption(f"Цель: {target_rating}+ на всех площадках | "
            f"Чёрный список: {len(BLACKLIST) // 2 if BLACKLIST else 0} артикулов | "
            f"Несезонных правил: {len(OFFSEASON_ITEMS)}")
@@ -610,28 +619,49 @@ if uploaded_file is not None:
                         lambda n: matches_any(n, SEASONAL_PATTERNS))
                     is_lamp = names_lower.apply(lambda n: matches_any(n, LAMP_PATTERNS))
 
-                    # Внутри приоритета 4: сезонные слова -> люстры -> остальное
-                    df_problems['Сортировка_4'] = np.select(
-                        [
-                            (df_problems['Приоритет'] == 4) & df_problems['Сезонный'],
-                            (df_problems['Приоритет'] == 4) & is_lamp,
-                            (df_problems['Приоритет'] == 4),
-                        ],
-                        [1, 2, 3],
-                        default=0
-                    )
+                    # Ступень сезонности (только для П3-4): сезонные -> [люстры] -> остальное.
+                    # Люстры поднимаются отдельной ступенью только если включён выключатель,
+                    # иначе сортируются наравне с прочими категориями.
+                    if boost_lamps:
+                        season_step = np.select(
+                            [
+                                (df_problems['Приоритет'] >= 3) & df_problems['Сезонный'],
+                                (df_problems['Приоритет'] >= 3) & is_lamp,
+                                (df_problems['Приоритет'] >= 3),
+                            ],
+                            [1, 2, 3],
+                            default=0
+                        )
+                    else:
+                        season_step = np.select(
+                            [
+                                (df_problems['Приоритет'] >= 3) & df_problems['Сезонный'],
+                                (df_problems['Приоритет'] >= 3),
+                            ],
+                            [1, 2],
+                            default=0
+                        )
+                    df_problems['Сортировка_сезон'] = season_step
 
-                    # Значимость площадки — последний ключ, только для приоритетов 3-4.
-                    # Для приоритетов 1-2 ключ = 0 у всех (не влияет).
+                    # Количество отзывов — меньше выше (только П3-4). Пусто = 0 отзывов.
+                    df_problems['Сортировка_отзывы'] = np.where(
+                        df_problems['Приоритет'] >= 3,
+                        df_problems['Отзывы_число'].fillna(0),
+                        0)
+
+                    # Значимость площадки (только П3-4): меньше число — выше.
                     plat_norm = df_problems['Площадка'].astype(str).str.strip().str.lower()
                     plat_rank = plat_norm.map(PLATFORM_PRIORITY).fillna(99)
                     df_problems['Сортировка_площадка'] = np.where(
                         df_problems['Приоритет'] >= 3, plat_rank, 0)
 
+                    # Порядок ключей для П3-4: приоритет -> отзывы -> сезонность ->
+                    # площадка -> рейтинг (тай-брейк). П1-2: все доп.ключи = 0,
+                    # сортируются по рейтингу как раньше.
                     df_problems.sort_values(
-                        by=['Приоритет', 'Сортировка_4', 'Сортировка_площадка',
-                            'Рейтинг_число'],
-                        ascending=[True, True, True, True],
+                        by=['Приоритет', 'Сортировка_отзывы', 'Сортировка_сезон',
+                            'Сортировка_площадка', 'Рейтинг_число'],
+                        ascending=[True, True, True, True, True],
                         inplace=True
                     )
 
