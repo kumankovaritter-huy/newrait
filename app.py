@@ -847,6 +847,25 @@ if uploaded_file is not None:
                                 cell.value = 'Открыть'
                                 cell.hyperlink = url
                                 cell.style = 'Hyperlink'
+
+                        # Объединяем ячейки артикула поставщика по блокам
+                        # подряд идущих одинаковых значений (строки уже сгруппированы).
+                        from openpyxl.styles import Alignment
+                        art_col_idx = excel_df.columns.get_loc('Артикул поставщика') + 1
+                        arts = excel_df['Артикул поставщика'].tolist()
+                        block_start = 0
+                        for i in range(1, len(arts) + 1):
+                            # конец блока: значение сменилось или достигнут конец
+                            if i == len(arts) or arts[i] != arts[block_start]:
+                                if i - block_start > 1:  # блок из 2+ строк
+                                    r1 = block_start + 2   # +2: шапка + 1-индексация
+                                    r2 = i + 1
+                                    ws.merge_cells(start_row=r1, end_row=r2,
+                                                   start_column=art_col_idx,
+                                                   end_column=art_col_idx)
+                                    ws.cell(row=r1, column=art_col_idx).alignment = \
+                                        Alignment(vertical='center')
+                                block_start = i
                     st.download_button(
                         label="📥 Скачать план в Excel",
                         data=buffer.getvalue(),
